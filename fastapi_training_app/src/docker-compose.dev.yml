@@ -1,0 +1,199 @@
+version: "3.8"
+
+networks:
+  backend:
+    name: backend
+    driver: bridge
+
+services:
+
+
+  training_app:
+    container_name: training_app
+    image: training_app
+    env_file:
+      - .env
+    build:
+      context: ./backend/
+      dockerfile: Dockerfile.dev
+    restart: on-failure
+    volumes:
+      - ./${LOCAL_APP_PATH}/scripts:/${PATH_APP_IN_DOCKER}/scripts
+      - ./${LOCAL_APP_PATH}/.docker:/${PATH_APP_IN_DOCKER}/.docker
+      - ./${LOCAL_APP_PATH}/training_app:/${PATH_APP_IN_DOCKER}/training_app
+      - ./${LOCAL_APP_PATH}/tests:/${PATH_APP_IN_DOCKER}/tests
+      - ./${LOCAL_APP_PATH}/main.py:/${PATH_APP_IN_DOCKER}/main.py
+      - ./${LOCAL_APP_PATH}/poetry.lock:/${PATH_APP_IN_DOCKER}/poetry.lock
+      - ./${LOCAL_APP_PATH}/pyproject.toml:/${PATH_APP_IN_DOCKER}/pyproject.toml
+      - ./${LOCAL_APP_PATH}/README.md:/${PATH_APP_IN_DOCKER}/README.md
+      - training_app_alembic_versions:/${PATH_APP_IN_DOCKER}/${APP_NAME}/alembic/versions
+      - training_app_venv:/${PATH_APP_IN_DOCKER}/.venv
+    ports:
+      - 8000:8000
+    depends_on:
+      flower_celery:
+        condition: service_started
+    networks:
+      - backend
+
+
+  mssql_db:
+    container_name: mssql_db
+    hostname: ${DB_HOST}
+    image: mssql_db
+    env_file:
+      - ./.env
+    build:
+      context: ./${LOCAL_APP_PATH}/.docker/databases/mssql/
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - ${DB_PORT}:1433
+    volumes:
+      - ${DOCKER_DATA_PATH}/mssql_data/logs/mssql.log:/opt/app/config.log
+      - mssql_data:/var/opt/mssql/
+    networks:
+      - backend
+    healthcheck:
+          test:
+              [
+                  "CMD-SHELL",
+                  '/opt/mssql-tools/bin/sqlcmd -S "${DB_HOST}" -U "${DB_USER}" -P "${DB_PASSWORD}" -d "${TEST_DB}" -Q "SELECT \"READY\"" | grep -q "READY"'
+              ]
+          interval: 10s
+          retries: 33
+          start_period: 10s
+          timeout: 3s
+
+
+  redis_cache:
+    container_name: redis_cache
+    hostname: ${REDIS_HOST}
+    image: redis_cache
+    env_file:
+      - ./.env
+    build:
+      context: ./${LOCAL_APP_PATH}/.docker/cache/redis/
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - ${REDIS_PORT}:6379
+    volumes:
+      - ${DOCKER_DATA_PATH}/redis_data/logs/redis-server.log:/var/log/redis/redis-server.log
+      - redis_data:/var/lib/redis
+    networks:
+      - backend
+    healthcheck:
+          test: ["CMD", "redis-cli", "ping"]
+          interval: 1s
+          timeout: 3s
+          retries: 30
+    depends_on:
+      mssql_db:
+        condition: service_healthy
+
+
+  rabbitmq_broker:
+    container_name: rabbitmq_broker
+    hostname: ${RABBITMQ_HOST}
+    image: rabbitmq_broker
+    env_file:
+      - ./.env
+    build:
+      context: ./${LOCAL_APP_PATH}/.docker/broker/rabbit_mq/
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - ${RABBITMQ_PORT_1}:5672
+      - ${RABBITMQ_PORT_2}:15672
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - backend
+    healthcheck:
+          test: rabbitmq-diagnostics -q status && rabbitmq-diagnostics -q check_local_alarms
+          interval: 30s
+          timeout: 30s
+          retries: 3
+    depends_on:
+      redis_cache:
+        condition: service_healthy
+
+
+  celery_worker:
+    container_name: celery_worker
+    hostname: ${CELERY_HOST}
+    image: celery_worker
+    env_file:
+      - ./.env
+    build:
+      context: ./${LOCAL_APP_PATH}/.docker/worker/celery/
+      dockerfile: Dockerfile
+    restart: always
+    volumes:
+      - ./${LOCAL_APP_PATH}/${APP_NAME}/celery_worker:/celery_worker
+    networks:
+      - backend
+    healthcheck:
+          test: celery -A celery_worker.app status
+          interval: 10s
+          timeout: 10s
+          retries: 10
+    depends_on:
+      rabbitmq_broker:
+        condition: service_healthy
+  
+
+  flower_celery:
+    container_name: flower_celery
+    hostname: ${FLOWER_CELERY_HOST}
+    image: flower_celery
+    env_file:
+      - ./.env
+    build:
+      context: ./${LOCAL_APP_PATH}/.docker/monitor/flower/
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - ${FLOWER_CELERY_PORT}:5555
+    volumes:
+      - ./${LOCAL_APP_PATH}/${APP_NAME}/celery_worker:/celery_worker
+    networks:
+      - backend
+    depends_on:
+      celery_worker:
+          condition: service_healthy
+
+
+
+volumes:
+  training_app_venv:
+    driver_opts:
+      o: bind
+      type: none
+      # TODO: Need to create a file file fastapi_training_app/.docker_data/backend/.venv/
+      device: ${DOCKER_DATA_PATH}/.venv/
+  training_app_alembic_versions:
+    driver_opts:
+      o: bind
+      type: none
+      # TODO: Need to create a file file fastapi_training_app/.docker_data/backend/alembic/versions/
+      device: ${DOCKER_DATA_PATH}/alembic_data/versions/
+  mssql_data:
+    driver_opts:
+      o: bind
+      type: none
+      # TODO: Need to create a file fastapi_training_app/.docker_data/backend/mssql_data/data: sudo chown -R 10001:0 fastapi_training_app/.docker_data
+      device: ${DOCKER_DATA_PATH}/mssql_data/data/
+  redis_data:
+    driver_opts:
+      o: bind
+      type: none
+      # TODO: Need to create a file fastapi_training_app/.docker_data/backend/redis_data/data: sudo chown -R 10001:0 fastapi_training_app/.docker_data
+      device: ${DOCKER_DATA_PATH}/redis_data/data/
+  rabbitmq_data:
+    driver_opts:
+      o: bind
+      type: none
+      # TODO: Need to create a file fastapi_training_app/.docker_data/backend/redis_data/data: sudo chown -R 10001:0 fastapi_training_app/.docker_data
+      device: ${DOCKER_DATA_PATH}/rabbitmq_data/

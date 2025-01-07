@@ -1,0 +1,8 @@
+CHANGELOG.md
+LICENSE
+.git
+.gitignore
+.github
+.venv
+__pycache__
+
